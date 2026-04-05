@@ -3,7 +3,7 @@ import pandas as pd
 import io
 import itertools
 from collections import Counter
-import datetime
+import re
 
 # --- Streamlit Page Config ---
 st.set_page_config(page_title="2D SUPER VIP", page_icon="🛡️", layout="wide")
@@ -15,6 +15,15 @@ target_types = ["ထိပ်", "ပိတ်", "ဘရိတ်"]
 
 power_dict = {0: 5, 1: 6, 2: 7, 3: 8, 4: 9, 5: 0, 6: 1, 7: 2, 8: 3, 9: 4}
 natkhat_dict = {0: 7, 7: 0, 1: 8, 8: 1, 2: 4, 4: 2, 3: 5, 5: 3, 6: 9, 9: 6}
+special_groups = {
+    "ညီကို": {"01","10","12","21","23","32","34","43","45","54","56","65","67","76","78","87","89","98","90","09"},
+    "ပါဝါ": {"05","50","16","61","27","72","38","83","49","94"},
+    "နက္ခတ်": {"07","70","18","81","24","42","35","53","69","96"},
+    "ထိုင်းပါဝါ": {"09","90","13","31","26","62","47","74","58","85"},
+    "အပူး": {"00","11","22","33","44","55","66","77","88","99"}
+}
+
+GLOBAL_TFS = [("၁ ပွဲ", 1, 1), ("၂ ပွဲ", 1, 2), ("၃ ပွဲ", 1, 3), ("၄ ပွဲ", 1, 4), ("၅ ပွဲ", 1, 5), ("၈ ပွဲ", 1, 8), ("၁၀ ပွဲ", 1, 10)]
 
 # --- 2. Password Protection ---
 def check_password():
@@ -35,7 +44,18 @@ def check_password():
     else:
         return True
 
-# --- 3. Core Algorithms ---
+# --- 3. UI Helpers ---
+def format_combos(combo_list, super_key):
+    if not combo_list: return "မရှိပါ"
+    res = []
+    for c in combo_list:
+        if int(c[0]) in super_key or int(c[1]) in super_key:
+            res.append(f"<span style='color:#ff4b4b; font-size:1.4em;'>{c}</span>")
+        else:
+            res.append(f"<span style='font-size:1.4em;'>{c}</span>")
+    return " &nbsp;&nbsp;&nbsp;&nbsp; ".join(res)
+
+# --- 4. Core System Algorithms (Gap & 5x5) ---
 def get_target_val(draw, t_type, time_slot):
     if time_slot == "AM":
         if t_type == "ထိပ်": return draw[0]
@@ -132,7 +152,6 @@ def get_gap_5x5_super_key(d, draw_time, daily_draws, window_size=300):
     last_h, last_t = last_draw[0], last_draw[1]
 
     scores = {i: 0.0 for i in range(10)}
-
     gap_heads, gap_tails = [], []
     for gap in [3, 4, 5]:
         preds = calculate_prediction(d, draw_time, daily_draws, [gap])
@@ -163,32 +182,22 @@ def get_gap_5x5_super_key(d, draw_time, daily_draws, window_size=300):
         if idx < 3: scores[digit] += 2.0
         elif idx < 6: scores[digit] += 1.0
 
-    scores[power_dict[last_h]] += 1.0
-    scores[power_dict[last_t]] += 1.0
-    scores[natkhat_dict[last_h]] += 1.0
-    scores[natkhat_dict[last_t]] += 1.0
+    scores[power_dict[last_h]] += 1.0; scores[power_dict[last_t]] += 1.0
+    scores[natkhat_dict[last_h]] += 1.0; scores[natkhat_dict[last_t]] += 1.0
 
     top_3_keys = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)[:3]
     return top_3_keys, full_history
 
-# --- 4. 5x5 Gatekeeper Replacement Logic ---
 def get_trend_replacements(full_history, window_size=300):
     recent_history = full_history[-window_size:] if len(full_history) > window_size else full_history
-    
-    head_scores = {i: 0.0 for i in range(10)}
-    tail_scores = {i: 0.0 for i in range(10)}
-    break_scores = {i: 0.0 for i in range(10)}
-    
+    head_scores = {i: 0.0 for i in range(10)}; tail_scores = {i: 0.0 for i in range(10)}; break_scores = {i: 0.0 for i in range(10)}
     for i, p_d in enumerate(full_history[-15:]):
         w = (i + 1) * 0.5
-        head_scores[p_d[0]] += w
-        tail_scores[p_d[1]] += w
-        break_scores[(p_d[0] + p_d[1]) % 10] += w
+        head_scores[p_d[0]] += w; tail_scores[p_d[1]] += w; break_scores[(p_d[0] + p_d[1]) % 10] += w
         
     top_h = sorted(head_scores.keys(), key=lambda x: head_scores[x], reverse=True)[:5]
     top_t = sorted(tail_scores.keys(), key=lambda x: tail_scores[x], reverse=True)[:5]
     top_b = sorted(break_scores.keys(), key=lambda x: break_scores[x], reverse=True)[:5]
-    
     return top_h, top_t, top_b
 
 def gatekeeper_replace(gap_list, trend_list):
@@ -198,94 +207,138 @@ def gatekeeper_replace(gap_list, trend_list):
         else:
             for t in trend_list:
                 if t not in clean_list:
-                    clean_list.append(t)
-                    break
+                    clean_list.append(t); break
     return clean_list
 
-def color_key_match(combo, key_list):
-    if int(combo[0]) in key_list or int(combo[1]) in key_list:
-        return f":red[**{combo}**]"
-    return combo
-
-# --- 5. Date & Calendar Matcher Engine ---
-def get_smart_calendar(df, daily_draws):
-    # ဖိုင်ထဲမှာ 'Day' ဒါမှမဟုတ် ရက်စွဲခေါင်းစဉ် ပါမပါ ရှာမည်
+# --- 5. V26 Engine (For Mode 1 & Mode 4) ---
+def build_v26_universe(daily_draws, raw_df):
+    f_draws = []
     day_col = None
-    for col in df.columns:
-        if col.lower() in ['day', 'date', 'days', 'ရက်']:
-            day_col = col
-            break
-            
-    original_len = len(df)
-    total_len = len(daily_draws)
-    assigned_dates = [""] * total_len
-    assigned_days = [""] * total_len
+    for col in raw_df.columns:
+        if col.lower() in ['day', 'date', 'days', 'ရက်']: day_col = col; break
     
-    # နောက်ပြန်တိုက်စစ်မည့် အခြေပြုရက်စွဲ (3 April 2026, Friday)
-    current_date = pd.to_datetime('2026-04-03')
-    
-    # (၁) မူလ Excel Data အတွက် နောက်ပြန်တွက်ခြင်း
-    for i in range(original_len - 1, -1, -1):
-        if day_col is not None and pd.notna(df.iloc[i][day_col]):
-            file_day = str(df.iloc[i][day_col]).strip()[:3].title() # ဥပမာ - 'Mon', 'Tue'
-            valid_days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-            
-            if file_day in valid_days:
-                # Excel ထဲက နေ့နာမည်နဲ့ မကိုက်မချင်း နောက်ပြန်ဆုတ်မည် (ပိတ်ရက်များကို ကျော်ရန်)
-                while current_date.strftime("%a") != file_day:
-                    current_date -= pd.Timedelta(days=1)
-                
-                assigned_dates[i] = current_date.strftime("%d %B %Y")
-                assigned_days[i] = file_day
-                current_date -= pd.Timedelta(days=1)
-                continue
-                
-        # အကယ်၍ Day ခေါင်းစဉ် မရှိပါက ပုံမှန် စနေ၊ တနင်္ဂနွေကိုသာ ကျော်မည်
-        while current_date.weekday() >= 5: 
-            current_date -= pd.Timedelta(days=1)
-        assigned_dates[i] = current_date.strftime("%d %B %Y")
-        assigned_days[i] = current_date.strftime("%a")
-        current_date -= pd.Timedelta(days=1)
-        
-    # (၂) App ပေါ်မှ တိုက်ရိုက် ထည့်ထားသော Data သစ်များအတွက် ရှေ့ဆက်တွက်ခြင်း
-    if total_len > original_len:
-        next_date = pd.to_datetime('2026-04-03') + pd.Timedelta(days=1)
-        for i in range(original_len, total_len):
-            while next_date.weekday() >= 5: 
-                next_date += pd.Timedelta(days=1)
-            assigned_dates[i] = next_date.strftime("%d %B %Y")
-            assigned_days[i] = next_date.strftime("%a")
-            next_date += pd.Timedelta(days=1)
-            
-    # Data Frame တည်ဆောက်ခြင်း
-    cal_data = []
     for i, d in enumerate(daily_draws):
-        am_str = f"{d[0]}{d[1]}" if d[0] is not None else "-"
-        pm_str = f"{d[2]}{d[3]}" if d[2] is not None else "-"
-        cal_data.append({
-            "Date": assigned_dates[i],
-            "Day": assigned_days[i],
-            "AM": am_str,
-            "PM": pm_str
-        })
-        
-    return pd.DataFrame(cal_data)
+        day_str = str(raw_df.iloc[i][day_col]).strip()[:3].title() if day_col and i < len(raw_df) and pd.notna(raw_df.iloc[i][day_col]) else "Mon"
+        if d[0] is not None: f_draws.append({'draw': f"{d[0]}{d[1]}", 'time': 'AM', 'day': day_str, 'index': len(f_draws)})
+        if d[2] is not None: f_draws.append({'draw': f"{d[2]}{d[3]}", 'time': 'PM', 'day': day_str, 'index': len(f_draws)})
+    return f_draws
 
+@st.cache_data(show_spinner=False)
+def analyze_history_mode1(target_2d, f_draws, scopes=[20, 25, 30, 35]):
+    hits = [d for d in f_draws if d['draw'] == target_2d]
+    if len(hits) < min(scopes): return None, None
+    
+    best_res = None
+    best_rate = -1
+    best_scope = 0
+    best_rule_name = ""
+    is_comeback = False
+
+    for scope in scopes:
+        if len(hits) < scope: continue
+        scope_hits = hits[-scope:]
+        
+        rules = [
+            ("လုံးဘိုင်", lambda ev, b1: any(b1 in d for d in ev)),
+            ("အမာခံ ၃ လုံး", lambda ev, key3: any(any(digit in d for digit in key3) for d in ev)),
+            ("ဘရိတ် ၂ လုံး", lambda ev, brk2: any(str((int(d[0])+int(d[1]))%10) in brk2 for d in ev))
+        ]
+        
+        for tf_name, s_off, e_off in [("၁ ပွဲ",1,1), ("၂ ပွဲ",1,2), ("၃ ပွဲ",1,3), ("၅ ပွဲ",1,5)]:
+            ev_subs = []
+            for hit in scope_hits:
+                s_idx = hit['index'] + s_off
+                e_idx = min(hit['index'] + e_off + 1, len(f_draws))
+                ev_subs.append([d['draw'] for d in f_draws[s_idx:e_idx]] if s_idx < len(f_draws) else [])
+                
+            if all(len(ev)==0 for ev in ev_subs): continue
+            
+            all_n = list(itertools.chain(*[ev for ev in ev_subs if ev]))
+            if not all_n: continue
+            
+            top_singles = [x[0] for x in Counter(itertools.chain(*[list(d) for d in all_n])).most_common(3)]
+            top_breaks = [x[0] for x in Counter([str((int(d[0])+int(d[1]))%10) for d in all_n]).most_common(2)]
+            
+            b1 = top_singles[0] if top_singles else ""
+            key3 = "".join(top_singles)
+            
+            for rule_name, rule_func in rules:
+                val = b1 if rule_name == "လုံးဘိုင်" else (key3 if rule_name == "အမာခံ ၃ လုံး" else top_breaks)
+                if not val: continue
+                
+                hit_results = [bool(rule_func(ev, val)) for ev in ev_subs if ev]
+                if not hit_results: continue
+                
+                correct = sum(hit_results)
+                rate = (correct / len(hit_results)) * 100
+                
+                if rate >= 95.0 and rate > best_rate:
+                    best_rate = rate
+                    best_res = {"val": val, "tf": tf_name, "rate": rate, "hits": f"{correct}/{len(hit_results)}"}
+                    best_scope = scope
+                    best_rule_name = rule_name
+                    
+                    # Comeback Tracker: Wait, Win... Lose, Win -> Current
+                    if len(hit_results) >= 3 and not hit_results[-2] and hit_results[-1]:
+                        is_comeback = True
+                    else:
+                        is_comeback = False
+
+    if best_res:
+        return best_res, {"scope": best_scope, "rule": best_rule_name, "comeback": is_comeback}
+    return None, None
+
+@st.cache_data(show_spinner=False)
+def run_mode4_alerts(f_draws):
+    if len(f_draws) < 20: return []
+    history = f_draws[-20:]
+    alerts = []
+    
+    for tf_name, s_off, e_off in GLOBAL_TFS:
+        ev_subs = []
+        for hit in history:
+            s_idx = hit['index'] + s_off
+            e_idx = min(hit['index'] + e_off + 1, len(f_draws))
+            ev_subs.append([d['draw'] for d in f_draws[s_idx:e_idx]] if s_idx < len(f_draws) else [])
+            
+        if all(len(ev)==0 for ev in ev_subs): continue
+        all_n = list(itertools.chain(*[ev for ev in ev_subs if ev]))
+        if not all_n: continue
+        
+        top_singles = [x[0] for x in Counter(itertools.chain(*[list(d) for d in all_n])).most_common(3)]
+        b1 = top_singles[0] if top_singles else ""
+        
+        # Simple Check for B1 Rem=1
+        if b1:
+            hit_res = [any(b1 in d for d in ev) for ev in ev_subs if ev]
+            if hit_res and sum(hit_res)/len(hit_res) >= 0.95:
+                curr_passed = 0 # simplified
+                rem = e_off - curr_passed
+                if rem == 1:
+                    alerts.append({"Type": "လုံးဘိုင်", "Value": b1, "TF": tf_name, "Rate": (sum(hit_res)/len(hit_res))*100})
+                    
+        # Simple Check for Group
+        best_g = ""
+        best_g_c = 0
+        for g, g_set in special_groups.items():
+            c = sum(1 for ev in ev_subs if ev and any(d in g_set for d in ev))
+            if c > best_g_c: best_g_c = c; best_g = g
+            
+        if best_g and len(ev_subs) > 0 and (best_g_c/len(ev_subs)) >= 0.95:
+             alerts.append({"Type": "အုပ်စု", "Value": best_g, "TF": tf_name, "Rate": (best_g_c/len(ev_subs))*100})
+             
+    return alerts
 
 # --- 6. Main Web App Layout ---
 if check_password():
     st.title("🛡️ 2D SUPER VIP (V28.0 System)")
     st.markdown("---")
 
-    # Initialize State
-    if "data_loaded" not in st.session_state:
-        st.session_state["data_loaded"] = False
+    if "data_loaded" not in st.session_state: st.session_state["data_loaded"] = False
 
-    # Sidebar: Data Input
     if not st.session_state["data_loaded"]:
         st.sidebar.header("📂 Excel / CSV Data စတင်တင်ရန်")
         uploaded_file = st.sidebar.file_uploader("မှတ်တမ်းဖိုင် တင်ပါ", type=['csv', 'xlsx'])
-        
         if uploaded_file is not None:
             if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
             else: df = pd.read_excel(uploaded_file)
@@ -305,14 +358,10 @@ if check_password():
             st.session_state["daily_draws"] = daily_draws
             st.session_state["data_loaded"] = True
             st.rerun()
-
     else:
         st.sidebar.header("📝 ယနေ့ထွက်ဂဏန်း အသစ်ထည့်ရန်")
-        st.sidebar.caption("Data ဖိုင်ကို ထပ်တင်စရာမလိုဘဲ တိုက်ရိုက် Update လုပ်နိုင်ပါသည်။")
-        
         new_am = st.sidebar.text_input("AM ထွက်ဂဏန်း (ဥပမာ - 15)", max_chars=2)
         new_pm = st.sidebar.text_input("PM ထွက်ဂဏန်း (ဥပမာ - 03)", max_chars=2)
-        
         if st.sidebar.button("Data Update လုပ်မည်", type="primary"):
             current_draws = st.session_state["daily_draws"]
             if new_am and len(new_am) == 2:
@@ -321,23 +370,20 @@ if check_password():
             if new_pm and len(new_pm) == 2:
                 if current_draws[-1][2] is None: current_draws[-1][2], current_draws[-1][3] = int(new_pm[0]), int(new_pm[1])
                 else: st.sidebar.error("ယနေ့အတွက် PM ဂဏန်း ရှိပြီးသားဖြစ်ပါသည်။")
-                    
-            st.session_state["daily_draws"] = current_draws
-            st.rerun()
-            
+            st.session_state["daily_draws"] = current_draws; st.rerun()
         if st.sidebar.button("Data ဖိုင် အသစ်ပြန်တင်မည်", type="secondary"):
-            st.session_state["data_loaded"] = False
-            st.rerun()
+            st.session_state["data_loaded"] = False; st.rerun()
 
-    # --- MAIN APP ---
+    # --- MAIN TABS ---
     if st.session_state["data_loaded"]:
         daily_draws = st.session_state["daily_draws"]
         raw_df = st.session_state["raw_df"]
+        f_draws = build_v26_universe(daily_draws, raw_df)
         
-        tab1, tab2, tab3 = st.tabs(["မူလစနစ်", "Stock Market စနစ်", "2D Calendar"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["မူလစနစ်", "Stock Market စနစ်", "2d history", "ရက်ချိန်းပြည့်မူများ", "2D Calendar"])
 
         # ==========================================
-        # TAB 1: မူလစနစ် (Gap + Gatekeeper Logic)
+        # TAB 1: မူလစနစ် (VIP 12 ကွက်)
         # ==========================================
         with tab1:
             st.subheader("AM/PM (ပင်ခြားစနစ်)")
@@ -347,141 +393,243 @@ if check_password():
                     last_row = calc_draws[-1]
                     predict_slots = []
                     
-                    if last_row[2] is None: 
-                        predict_slots.append(("PM", len(calc_draws) - 1))
+                    if last_row[2] is None: predict_slots.append(("PM", len(calc_draws) - 1))
                     else:
                         calc_draws.append([None, None, None, None])
                         predict_slots.append(("AM", len(calc_draws) - 1))
                         predict_slots.append(("PM", len(calc_draws) - 1))
                         
                     cols = st.columns(len(predict_slots))
-                    
                     for i, (slot, t_idx) in enumerate(predict_slots):
                         super_key, full_hist = get_gap_5x5_super_key(t_idx, slot, calc_draws)
                         if super_key is None: continue
-                        
                         trend_h, trend_t, trend_b = get_trend_replacements(full_hist)
-                        gap_results = {3: [], 4: [], 5: []}
+                        
+                        all_12 = []
+                        vip_list = []
+                        super_vip = []
+                        rest_list = []
                         
                         for gap in [3, 4, 5]:
                             preds = calculate_prediction(t_idx, slot, calc_draws, [gap])
-                            g_heads = preds["ထိပ်"][:2] if preds["ထိပ်"] else trend_h[:2]
-                            g_tails = preds["ပိတ်"][:2] if preds["ပိတ်"] else trend_t[:2]
-                            g_breaks = preds["ဘရိတ်"][:2] if preds["ဘရိတ်"] else trend_b[:2]
+                            g_h = preds["ထိပ်"][:2] if preds["ထိပ်"] else trend_h[:2]
+                            g_t = preds["ပိတ်"][:2] if preds["ပိတ်"] else trend_t[:2]
                             
-                            clean_h = gatekeeper_replace(g_heads, trend_h)
-                            clean_t = gatekeeper_replace(g_tails, trend_t)
-                            clean_b = gatekeeper_replace(g_breaks, trend_b)
+                            c_h = gatekeeper_replace(g_h, trend_h)[:2]
+                            c_t = gatekeeper_replace(g_t, trend_t)[:2]
                             
-                            combos = []
-                            for h in clean_h:
-                                for t in clean_t:
-                                    if (h + t) % 10 in clean_b: combos.append(f"{h}{t}")
-                            gap_results[gap] = combos
-                            
-                        all_combos_list = gap_results[3] + gap_results[4] + gap_results[5]
-                        counts = Counter(all_combos_list)
-                        
-                        super_vip = [c for c, count in counts.items() if count >= 3]
-                        vip = [c for c, count in counts.items() if count == 2]
-                        rest = [c for c, count in counts.items() if count == 1]
+                            for h in c_h:
+                                for t in c_t:
+                                    cmb = f"{h}{t}"
+                                    all_12.append(cmb)
+                                    
+                        counts = Counter(all_12)
+                        for cmb, count in counts.items():
+                            is_vip = ((int(cmb[0]) + int(cmb[1])) % 10) in trend_b
+                            if is_vip and count >= 2: super_vip.append(cmb)
+                            elif is_vip: vip_list.append(cmb)
+                            else: rest_list.append(cmb)
 
                         with cols[i]:
                             st.markdown(f"### {slot} ခန့်မှန်းရလဒ်")
-                            st.write(f"**Super Key {super_key}**")
+                            st.markdown(f"<p style='font-size:1.2em;'>**Super Key [{', '.join(str(k) for k in super_key)}]**</p>", unsafe_allow_html=True)
                             st.markdown("---")
                             
                             if super_vip:
                                 st.markdown("#### Super VIP")
-                                st.markdown(" &nbsp;&nbsp; ".join([color_key_match(c, super_key) for c in super_vip]))
-                                st.code(", ".join(super_vip), language="text") 
-                                
-                            if vip:
+                                st.markdown(format_combos(super_vip, super_key), unsafe_allow_html=True)
+                                st.code(", ".join(super_vip), language="text")
+                            if vip_list:
                                 st.markdown("#### VIP")
-                                st.markdown(" &nbsp;&nbsp; ".join([color_key_match(c, super_key) for c in vip]))
-                                st.code(", ".join(vip), language="text") 
-                                
-                            if rest:
+                                st.markdown(format_combos(vip_list, super_key), unsafe_allow_html=True)
+                                st.code(", ".join(vip_list), language="text")
+                            if rest_list:
                                 st.markdown("####") 
-                                st.markdown(" &nbsp;&nbsp; ".join([color_key_match(c, super_key) for c in rest]))
-                                st.code(", ".join(rest), language="text") 
-                                
-                            with st.expander("အပြည့်အစုံကြည့်ပါ"):
-                                st.write("**၃ ပင်ခြား:**", ", ".join(gap_results[3]) if gap_results[3] else "မရှိပါ")
-                                st.write("**၄ ပင်ခြား:**", ", ".join(gap_results[4]) if gap_results[4] else "မရှိပါ")
-                                st.write("**၅ ပင်ခြား:**", ", ".join(gap_results[5]) if gap_results[5] else "မရှိပါ")
+                                st.markdown(format_combos(rest_list, super_key), unsafe_allow_html=True)
+                                st.code(", ".join(rest_list), language="text")
 
             st.markdown("---")
             st.markdown("### နောက်ကြောင်းပြန်စစ်မည်")
+            c_bt1, c_bt2 = st.columns(2)
+            with c_bt1: bt_days_1 = st.number_input("ရက်အရေအတွက် (Tab 1)", min_value=5, max_value=100, value=15)
+            with c_bt2: bt_time_1 = st.radio("အချိန်ရွေးပါ (Tab 1)", ["AM", "PM", "Both"], horizontal=True)
+            
             if st.button("စစ်ဆေးမည် 🔍", key="btn_bt_tab1"):
-                with st.spinner("Backtest တွက်ချက်နေပါသည်..."):
-                    test_limit = 15
+                with st.spinner(f"{bt_days_1} ရက်စာ Backtest တွက်ချက်နေပါသည်..."):
                     bt_data = []
-                    start_idx = max(10, len(daily_draws) - test_limit)
-                    
+                    start_idx = max(10, len(daily_draws) - bt_days_1)
                     for test_d in range(start_idx, len(daily_draws)):
-                        if daily_draws[test_d][0] is not None:
-                            k_am, _ = get_gap_5x5_super_key(test_d, "AM", daily_draws)
-                            if k_am:
-                                a_am = f"{daily_draws[test_d][0]}{daily_draws[test_d][1]}"
-                                is_w = int(a_am[0]) in k_am or int(a_am[1]) in k_am
-                                bt_data.append({"Day": test_d, "Time": "AM", "Actual": a_am, "Super Key": str(k_am), "Result": "✅ WIN" if is_w else "❌ LOSE"})
-                            
-                        if daily_draws[test_d][2] is not None:
-                            k_pm, _ = get_gap_5x5_super_key(test_d, "PM", daily_draws)
-                            if k_pm:
-                                a_pm = f"{daily_draws[test_d][2]}{daily_draws[test_d][3]}"
-                                is_w = int(a_pm[0]) in k_pm or int(a_pm[1]) in k_pm
-                                bt_data.append({"Day": test_d, "Time": "PM", "Actual": a_pm, "Super Key": str(k_pm), "Result": "✅ WIN" if is_w else "❌ LOSE"})
-                    
-                    if bt_data:
-                        df_bt = pd.DataFrame(bt_data)
-                        st.dataframe(df_bt, use_container_width=True)
+                        slots_to_test = ["AM", "PM"] if bt_time_1 == "Both" else [bt_time_1]
+                        for t_slot in slots_to_test:
+                            idx1, idx2 = (0,1) if t_slot == "AM" else (2,3)
+                            if daily_draws[test_d][idx1] is not None:
+                                k, _ = get_gap_5x5_super_key(test_d, t_slot, daily_draws)
+                                if k:
+                                    actual = f"{daily_draws[test_d][idx1]}{daily_draws[test_d][idx2]}"
+                                    is_win = int(actual[0]) in k or int(actual[1]) in k
+                                    bt_data.append({"Day": test_d, "Time": t_slot, "Actual": actual, "Super Key": str(k), "Result": "✅ WIN" if is_win else "❌ LOSE"})
+                    if bt_data: st.dataframe(pd.DataFrame(bt_data), use_container_width=True)
 
         # ==========================================
         # TAB 2: Stock Market စနစ်
         # ==========================================
         with tab2:
             st.subheader("Stock Market စနစ်")
-            c1, c2 = st.columns([1, 2])
-            with c1: e_time = st.radio("အချိန်ရွေးပါ:", ["AM", "PM"], key="tab2_time")
-            
+            e_time = st.radio("အချိန်ရွေးပါ:", ["AM", "PM"], key="tab2_time", horizontal=True)
             if st.button("ခန့်မှန်းမည်", type="primary", key="btn_tab2"):
                 with st.spinner("Stock Market Trend များကို တွက်ချက်နေပါသည်..."):
                     calc_draws = daily_draws.copy()
                     if e_time == "AM" and calc_draws[-1][0] is not None:
-                        calc_draws.append([None, None, None, None])
-                        target_d = len(calc_draws) - 1
+                        calc_draws.append([None, None, None, None]); target_d = len(calc_draws) - 1
                     elif e_time == "PM" and calc_draws[-1][2] is not None:
                         if calc_draws[-1][0] is None: target_d = len(calc_draws) - 1
-                        else:
-                            calc_draws.append([None, None, None, None])
-                            target_d = len(calc_draws) - 1
+                        else: calc_draws.append([None, None, None, None]); target_d = len(calc_draws) - 1
                     else: target_d = len(calc_draws) - 1
 
-                    _, full_hist = get_gap_5x5_super_key(target_d, e_time, calc_draws)
+                    super_key, full_hist = get_gap_5x5_super_key(target_d, e_time, calc_draws)
                     if full_hist:
                         t_h, t_t, _ = get_trend_replacements(full_hist)
                         st.success(f"🎯 **Stock Market စနစ် ခန့်မှန်းချက်**")
-                        col_h, col_t = st.columns(2)
-                        with col_h: st.info(f"**ထိပ် ၅ လုံး:** {', '.join(str(x) for x in t_h)}")
-                        with col_t: st.warning(f"**ပိတ် ၅ လုံး:** {', '.join(str(x) for x in t_t)}")
-                        
                         pairs = [f"{h}{t}" for h in t_h for t in t_t]
-                        st.markdown("### 🔥 ထွက်ပေါ်လာသော ၂၅ ကွက်:")
+                        st.markdown(f"### 🔥 ထွက်ပေါ်လာသော ၂၅ ကွက် (Super Key: {super_key})")
+                        st.markdown(format_combos(pairs, super_key), unsafe_allow_html=True)
                         st.code(", ".join(pairs), language="text")
 
             st.markdown("---")
             st.markdown("### Stock Market စနစ်ကို နောက်ကြောင်းပြန်စစ်မည်")
+            c_bt3, c_bt4 = st.columns(2)
+            with c_bt3: bt_days_2 = st.number_input("ရက်အရေအတွက် (Tab 2)", min_value=5, max_value=100, value=15)
+            with c_bt4: bt_time_2 = st.radio("အချိန်ရွေးပါ (Tab 2)", ["AM", "PM", "Both"], horizontal=True)
+            
             if st.button("စစ်ဆေးမည် 🔍", key="btn_bt_tab2"):
-                 st.info("Stock Market စနစ် နောက်ကြောင်းပြန်စစ်ဆေးမှု ဇယားကို ဤနေရာတွင် မြင်တွေ့ရပါမည်။")
+                with st.spinner("Stock Market Backtest တွက်ချက်နေပါသည်..."):
+                    bt_data_sm = []
+                    start_idx = max(10, len(daily_draws) - bt_days_2)
+                    for test_d in range(start_idx, len(daily_draws)):
+                        slots_to_test = ["AM", "PM"] if bt_time_2 == "Both" else [bt_time_2]
+                        for t_slot in slots_to_test:
+                            idx1, idx2 = (0,1) if t_slot == "AM" else (2,3)
+                            if daily_draws[test_d][idx1] is not None:
+                                s_key, f_hist = get_gap_5x5_super_key(test_d, t_slot, daily_draws)
+                                if f_hist:
+                                    t_h, t_t, _ = get_trend_replacements(f_hist)
+                                    sm_pairs = [f"{h}{t}" for h in t_h for t in t_t]
+                                    actual = f"{daily_draws[test_d][idx1]}{daily_draws[test_d][idx2]}"
+                                    sm_win = actual in sm_pairs
+                                    key_win = int(actual[0]) in s_key or int(actual[1]) in s_key
+                                    bt_data_sm.append({
+                                        "Day": test_d, "Time": t_slot, "Actual": actual, 
+                                        "Stock 25 Result": "✅ WIN" if sm_win else "❌",
+                                        "Super Key Result": "✅ WIN" if key_win else "❌"
+                                    })
+                    if bt_data_sm: st.dataframe(pd.DataFrame(bt_data_sm), use_container_width=True)
 
         # ==========================================
-        # TAB 3: 2D Calendar
+        # TAB 3: 2d history
         # ==========================================
         with tab3:
-            st.subheader("📅 2D Calendar (မှတ်တမ်း)")
-            st.caption("Excel ဖိုင်ပါ ရက်များအတိုင်း အလိုအလျောက် တိုက်စစ်ပေးထားပါသည်။ (ပိတ်ရက်များကို ကျော်ထားပါသည်)")
+            st.subheader("2D History (Data Analysis)")
+            t_2d = st.text_input("ရှာဖွေလိုသော ဂဏန်းရိုက်ထည့်ပါ (ဥပမာ - 01)", max_chars=2)
+            ana_mode = st.radio("စစ်ဆေးမည့်ပုံစံ", ["Auto (Best 95%+ & Comeback)", "Manual"], horizontal=True)
             
+            if ana_mode == "Manual": manual_times = st.number_input("နောက်ဆုံး အကြိမ်ရေ ဘယ်လောက်စစ်မလဲ?", min_value=5, max_value=100, value=20)
+                
+            if st.button("သမိုင်းကြောင်း ရှာဖွေမည် 🔍", type="primary"):
+                if len(t_2d) == 2:
+                    with st.spinner(f"[{t_2d}] အတွက် Data များကို ရှာဖွေနေပါသည်..."):
+                        if ana_mode == "Auto (Best 95%+ & Comeback)":
+                            best_res, meta = analyze_history_mode1(t_2d, f_draws)
+                            if best_res:
+                                st.success(f"🎯 **အကောင်းဆုံး အခြေအနေ တွေ့ရှိပါသည်! (နောက်ဆုံး {meta['scope']} ကြိမ်အတွင်း)**")
+                                st.markdown(f"**မူအမျိုးအစား:** {meta['rule']} ➡️ <span style='color:red; font-size:1.3em; font-weight:bold;'>[{best_res['val']}]</span>", unsafe_allow_html=True)
+                                st.write(f"**အချိန်ဘောင်:** {best_res['tf']} အတွင်း")
+                                st.write(f"**မှန်ကန်မှု:** {best_res['hits']} ({best_res['rate']:.1f}%)")
+                                
+                                if meta['comeback']:
+                                    st.error("🔥 **အထူးသတိပေးချက်: ဤမူသည် လွန်ခဲ့သောပွဲက လွဲချော်ခဲ့ပြီး ယခု ပြန်လည်ဝင်ရောက်လာသော [အမှားပြန်ဆယ်မူ] ဖြစ်သဖြင့် အထူး အားကောင်းနေပါသည်။**")
+                            else:
+                                st.warning("လတ်တလော အကြိမ် ၂၀ မှ ၃၅ ကြိမ်အတွင်း 95% အထက် သေချာသော အခြေအနေ မတွေ့ရှိပါ။")
+                        else:
+                            # Manual Check
+                            best_res, _ = analyze_history_mode1(t_2d, f_draws, scopes=[manual_times])
+                            if best_res:
+                                st.info(f"📊 **နောက်ဆုံး {manual_times} ကြိမ်အတွင်း အကောင်းဆုံးတွေ့ရှိချက်**")
+                                st.write(f"**မူအမျိုးအစား:** {best_res['val']} ({best_res['tf']}) - {best_res['rate']:.1f}%")
+                            else:
+                                st.warning("သတ်မှတ်ထားသော အကြိမ်ရေအတွင်း ထင်ရှားသော မူမရှိပါ။")
+
+        # ==========================================
+        # TAB 4: ရက်ချိန်းပြည့်မူများ
+        # ==========================================
+        with tab4:
+            st.subheader("ရက်ချိန်းပြည့်မူများ (1 Draw Left)")
+            if st.button("မူကျန်များ ရှာဖွေမည် 🚀", type="primary"):
+                with st.spinner("မူ (၁၀) မျိုးလုံးကို ပတ်မွှေနေပါသည်..."):
+                    raw_alerts = run_mode4_alerts(f_draws)
+                    
+                    if raw_alerts:
+                        _, full_hist = get_gap_5x5_super_key(len(daily_draws)-1, "AM", daily_draws) # mock for trend
+                        t_h, t_t, t_b = get_trend_replacements(full_hist)
+                        valid_gks = t_h + t_t
+                        
+                        super_cards = []
+                        for a in raw_alerts:
+                            if a['Type'] == "လုံးဘိုင်" and int(a['Value']) in valid_gks:
+                                super_cards.append(a)
+                                
+                        if super_cards:
+                            st.markdown("### 🌟 Super VIP ကတ်များ (5x5 Gatekeeper ဖြင့် အတည်ပြုပြီး)")
+                            cols = st.columns(min(3, len(super_cards)))
+                            for i, card in enumerate(super_cards):
+                                with cols[i % 3]:
+                                    st.info(f"🔥 **{card['Type']} : {card['Value']}**\n\n⏳ {card['TF']} အတွင်း\n\n🎯 {card['Rate']:.1f}% သေချာသည်")
+                                    
+                        st.markdown("---")
+                        st.markdown("### 📋 မူကျန်အားလုံး အသေးစိတ်ဇယား")
+                        df_alerts = pd.DataFrame(raw_alerts)
+                        st.dataframe(df_alerts.sort_values(by="Rate", ascending=False), use_container_width=True)
+                    else:
+                        st.success("✅ ယခုအချိန်တွင် ရက်ချိန်းပြည့် (၁ ပွဲသာလို) မူများ မရှိသေးပါ။")
+
+        # ==========================================
+        # TAB 5: 2D Calendar
+        # ==========================================
+        with tab5:
+            st.subheader("📅 2D Calendar (မှတ်တမ်း)")
+            def get_smart_calendar(df, daily_draws):
+                day_col = None
+                for col in df.columns:
+                    if col.lower() in ['day', 'date', 'days', 'ရက်']: day_col = col; break
+                original_len = len(df); total_len = len(daily_draws)
+                assigned_dates = [""] * total_len; assigned_days = [""] * total_len
+                current_date = pd.to_datetime('2026-04-03')
+                
+                for i in range(original_len - 1, -1, -1):
+                    if day_col is not None and pd.notna(df.iloc[i][day_col]):
+                        file_day = str(df.iloc[i][day_col]).strip()[:3].title() 
+                        valid_days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+                        if file_day in valid_days:
+                            while current_date.strftime("%a") != file_day: current_date -= pd.Timedelta(days=1)
+                            assigned_dates[i] = current_date.strftime("%d %B %Y")
+                            assigned_days[i] = file_day
+                            current_date -= pd.Timedelta(days=1)
+                            continue
+                    while current_date.weekday() >= 5: current_date -= pd.Timedelta(days=1)
+                    assigned_dates[i] = current_date.strftime("%d %B %Y"); assigned_days[i] = current_date.strftime("%a")
+                    current_date -= pd.Timedelta(days=1)
+                    
+                if total_len > original_len:
+                    next_date = pd.to_datetime('2026-04-03') + pd.Timedelta(days=1)
+                    for i in range(original_len, total_len):
+                        while next_date.weekday() >= 5: next_date += pd.Timedelta(days=1)
+                        assigned_dates[i] = next_date.strftime("%d %B %Y"); assigned_days[i] = next_date.strftime("%a")
+                        next_date += pd.Timedelta(days=1)
+                
+                cal_data = []
+                for i, d in enumerate(daily_draws):
+                    cal_data.append({"Date": assigned_dates[i], "Day": assigned_days[i], "AM": f"{d[0]}{d[1]}" if d[0] is not None else "-", "PM": f"{d[2]}{d[3]}" if d[2] is not None else "-"})
+                return pd.DataFrame(cal_data)
+
             df_cal = get_smart_calendar(raw_df, daily_draws)
             st.dataframe(df_cal.iloc[::-1].reset_index(drop=True), use_container_width=True)
+
