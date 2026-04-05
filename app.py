@@ -4,6 +4,18 @@ import io
 import itertools
 from collections import Counter
 
+# Streamlit Page Config (Must be the first Streamlit command)
+st.set_page_config(page_title="2D SUPER VIP", page_icon="🛡️", layout="wide")
+
+# --- Global Variables & Dictionaries ---
+MIN_STREAK = 3    
+all_combos = list(itertools.combinations(range(20), 3))
+target_types = ["ထိပ်", "ပိတ်", "ဘရိတ်"]
+
+power_dict = {0: 5, 1: 6, 2: 7, 3: 8, 4: 9, 5: 0, 6: 1, 7: 2, 8: 3, 9: 4}
+natkhat_dict = {0: 7, 7: 0, 1: 8, 8: 1, 2: 4, 4: 2, 3: 5, 5: 3, 6: 9, 9: 6}
+
+
 # --- 1. Password Protection ---
 def check_password():
     def password_entered():
@@ -23,11 +35,119 @@ def check_password():
     else:
         return True
 
-# --- 2. Core Algorithm Functions (Gap) ---
-MIN_STREAK = 3    
-all_combos = list(itertools.combinations(range(20), 3))
-target_types = ["ထိပ်", "ပိတ်", "ဘရိတ်"]
 
+# --- 2. Data Processing Function ---
+def process_file(uploaded_file):
+    if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
+    else: df = pd.read_excel(uploaded_file)
+        
+    df.columns = df.columns.str.strip().str.lower()
+    for col in ['am1', 'am2', 'pm1', 'pm2']:
+        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
+    df = df.dropna(subset=['am1', 'am2']).reset_index(drop=True)
+    
+    daily_draws = []
+    last_valid_index = df.index[-1] if not df.empty else -1
+    for index, row in df.iterrows():
+        am_valid = pd.notna(row['am1']) and pd.notna(row['am2'])
+        pm_valid = 'pm1' in df.columns and 'pm2' in df.columns and pd.notna(row['pm1']) and pd.notna(row['pm2'])
+        if am_valid and pm_valid: daily_draws.append([int(row['am1']), int(row['am2']), int(row['pm1']), int(row['pm2'])])
+        elif am_valid and not pm_valid and index == last_valid_index: daily_draws.append([int(row['am1']), int(row['am2']), None, None])
+    return df, daily_draws
+
+
+# --- 3. [NEW] 5x5 Hybrid Rolling Window Engine ---
+@st.cache_data(show_spinner=False)
+def predict_5x5_rolling_window(d, draw_time, daily_draws, window_size=300):
+    if d < 10 or d >= len(daily_draws): return None
+    
+    col_h, col_t = (0, 1) if draw_time == "AM" else (2, 3)
+    
+    # 1. သမိုင်းကြောင်းများကို လက်ရှိ Draw အချိန်မတိုင်ခင်အထိသာ ဆွဲထုတ်မည် (No lookahead bias)
+    full_history = []
+    for past_d in range(d + 1):
+        # AM data
+        if daily_draws[past_d][0] is not None and daily_draws[past_d][1] is not None:
+            if past_d == d and draw_time == "AM": pass # Don't add current AM if predicting AM
+            else: full_history.append((daily_draws[past_d][0], daily_draws[past_d][1]))
+        
+        # PM data
+        if daily_draws[past_d][2] is not None and daily_draws[past_d][3] is not None:
+            if past_d == d and draw_time == "PM": pass # Don't add current PM if predicting PM
+            else: full_history.append((daily_draws[past_d][2], daily_draws[past_d][3]))
+
+    if len(full_history) < 2: return None
+    
+    last_draw = full_history[-1] # အတိကျဆုံး နောက်ဆုံးထွက်ခဲ့တဲ့ ဂဏန်း
+    last_h, last_t = last_draw[0], last_draw[1]
+    
+    if len(full_history) > window_size:
+        recent_history = full_history[-window_size:]
+    else:
+        recent_history = full_history
+
+    # 2. ရေရှည် Trend တွက်ချက်ခြင်း
+    head_freq = {i: 0 for i in range(10)}
+    tail_freq = {i: 0 for i in range(10)}
+    for idx in range(len(recent_history) - 1):
+        curr, nxt = recent_history[idx], recent_history[idx + 1]
+        if curr[0] == last_h: head_freq[nxt[0]] += 1
+        if curr[1] == last_t: tail_freq[nxt[1]] += 1
+            
+    # 3. လတ်တလော Trend ကို Weight ပေးခြင်း (Last 10 draws)
+    recent_h_freq = {i: 0.0 for i in range(10)}
+    recent_t_freq = {i: 0.0 for i in range(10)}
+    very_recent = full_history[-10:] 
+    for i, p_d in enumerate(very_recent):
+        weight = (i + 1) * 0.5 
+        recent_h_freq[p_d[0]] += weight
+        recent_t_freq[p_d[1]] += weight
+
+    # 4. ထိပ် (၅) လုံး ရွေးချယ်ခြင်း
+    top_heads = []
+    for h in sorted(head_freq.keys(), key=lambda x: head_freq[x], reverse=True):
+        if head_freq[h] > 0 and len(top_heads) < 2: top_heads.append(h)
+    
+    if power_dict[last_h] not in top_heads: top_heads.append(power_dict[last_h])
+    if natkhat_dict[last_h] not in top_heads: top_heads.append(natkhat_dict[last_h])
+    
+    for h in sorted(recent_h_freq.keys(), key=lambda x: recent_h_freq[x], reverse=True):
+        if h not in top_heads: top_heads.append(h)
+        if len(top_heads) == 5: break
+
+    # 5. ပိတ် (၅) လုံး ရွေးချယ်ခြင်း
+    top_tails = []
+    for t in sorted(tail_freq.keys(), key=lambda x: tail_freq[x], reverse=True):
+        if tail_freq[t] > 0 and len(top_tails) < 2: top_tails.append(t)
+        
+    if power_dict[last_t] not in top_tails: top_tails.append(power_dict[last_t])
+    if natkhat_dict[last_t] not in top_tails: top_tails.append(natkhat_dict[last_t])
+    
+    for t in sorted(recent_t_freq.keys(), key=lambda x: recent_t_freq[x], reverse=True):
+        if t not in top_tails: top_tails.append(t)
+        if len(top_tails) == 5: break
+
+    # 6. ၂၅ ကွက် ဖန်တီးခြင်း
+    final_25_pairs = []
+    for h in top_heads:
+        for t in top_tails:
+            final_25_pairs.append(f"{h}{t}")
+            
+    # 7. Check if win (For Backtest)
+    is_win = None
+    draw_str = "-"
+    if daily_draws[d][col_h] is not None and daily_draws[d][col_t] is not None:
+        draw_str = f"{daily_draws[d][col_h]}{daily_draws[d][col_t]}"
+        is_win = draw_str in final_25_pairs
+
+    return {
+        'target': draw_str, 'last_draw': f"{last_h}{last_t}",
+        'heads': top_heads, 'tails': top_tails,
+        'pairs': final_25_pairs, 'is_win': is_win
+    }
+
+
+# --- 4. V27 Core Algorithm Functions (Gap & Ensemble) ---
 def get_target_val(draw, t_type, time_slot):
     if time_slot == "AM":
         if t_type == "ထိပ်": return draw[0]
@@ -94,24 +214,6 @@ def calculate_prediction(target_idx, slot, daily_draws, skip_sizes):
             top_2_results[t_type] = [k for k, v in sorted_votes[:2]]
     return top_2_results
 
-def process_file(uploaded_file):
-    if uploaded_file.name.endswith('.csv'): df = pd.read_csv(uploaded_file)
-    else: df = pd.read_excel(uploaded_file)
-        
-    df.columns = df.columns.str.strip().str.lower()
-    for col in ['am1', 'am2', 'pm1', 'pm2']:
-        if col in df.columns: df[col] = pd.to_numeric(df[col], errors='coerce')
-    df = df.dropna(subset=['am1', 'am2']).reset_index(drop=True)
-    
-    daily_draws = []
-    last_valid_index = df.index[-1] if not df.empty else -1
-    for index, row in df.iterrows():
-        am_valid = pd.notna(row['am1']) and pd.notna(row['am2'])
-        pm_valid = 'pm1' in df.columns and 'pm2' in df.columns and pd.notna(row['pm1']) and pd.notna(row['pm2'])
-        if am_valid and pm_valid: daily_draws.append([int(row['am1']), int(row['am2']), int(row['pm1']), int(row['pm2'])])
-        elif am_valid and not pm_valid and index == last_valid_index: daily_draws.append([int(row['am1']), int(row['am2']), None, None])
-    return df, daily_draws
-
 def get_ensemble_results(gap_results_list):
     all_combos, all_vips = [], []
     for res in gap_results_list:
@@ -132,10 +234,6 @@ def get_ensemble_results(gap_results_list):
             
     return sorted(super_vips), sorted(vips), sorted(mains), sorted(backups)
 
-# --- 3. မြန်မာ 2D ပါဝါ၊ နက္ခတ် နှင့် Hybrid Key Logic ---
-power_dict = {0: 5, 1: 6, 2: 7, 3: 8, 4: 9, 5: 0, 6: 1, 7: 2, 8: 3, 9: 4}
-natkhat_dict = {0: 7, 7: 0, 1: 8, 8: 1, 2: 4, 4: 2, 3: 5, 5: 3, 6: 9, 9: 6}
-
 @st.cache_data(show_spinner=False)
 def get_hybrid_super_key(test_idx, time_choice, daily_draws, gaps_to_check=[3, 4, 5]):
     scores = {i: 0 for i in range(10)}
@@ -155,7 +253,7 @@ def get_hybrid_super_key(test_idx, time_choice, daily_draws, gaps_to_check=[3, 4
         elif test_idx > 0 and daily_draws[test_idx-1][0] is not None: 
             prev_h, prev_t = daily_draws[test_idx-1][0], daily_draws[test_idx-1][1]
     else: 
-        if daily_draws[test_idx][0] is not None:
+        if test_idx < len(daily_draws) and daily_draws[test_idx][0] is not None:
             prev_h, prev_t = daily_draws[test_idx][0], daily_draws[test_idx][1]
         else:
             if test_idx > 0 and daily_draws[test_idx-1][2] is not None:
@@ -174,7 +272,6 @@ def get_hybrid_super_key(test_idx, time_choice, daily_draws, gaps_to_check=[3, 4
     top_3_digits = sorted(scores.keys(), key=lambda k: scores[k], reverse=True)[:3]
     return [str(x) for x in top_3_digits]
 
-# --- 4. ကွက်ချုပ် (၁၂-၁၂-၁၂) Scoring Logic ---
 @st.cache_data(show_spinner=False)
 def get_12_12_12_kuet_chote(test_idx, time_choice, daily_draws, gaps_to_check=[3, 4, 5]):
     history_start = max(0, test_idx - 5)
@@ -228,10 +325,10 @@ def get_12_12_12_kuet_chote(test_idx, time_choice, daily_draws, gaps_to_check=[3
     
     return sorted_combo_list[:12], sorted_combo_list[12:24], sorted_combo_list[24:36]
 
+
 # --- 5. Main Web App Layout ---
 if check_password():
-    st.set_page_config(page_title="2D SUPER VIP", page_icon="🛡️", layout="wide")
-    st.title("🛡️ 2D SUPER VIP (V27.00 - Hybrid Edition)")
+    st.title("🛡️ 2D SUPER VIP (V28.0 - Hybrid + 5x5 Engine)")
     st.markdown("---")
 
     st.sidebar.header("📂 Data Upload")
@@ -243,17 +340,25 @@ if check_password():
         st.sidebar.success(f"✅ Data ဖတ်ရှုခြင်း အောင်မြင်ပါသည်။ (စုစုပေါင်း {total_days} ရက်)")
 
         # TABS SETUP
-        tab1, tab2, tab3, tab4 = st.tabs(["Super VIP ခန့်မှန်းချက်", "နောက်ကြောင်းပြန်စစ်မည်", "2D calendar", "🎯 ကွက်ချုပ် ၃၆ & Hybrid Filter"])
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "V27 မူလ စနစ်", 
+            "📈 5x5 Rolling Engine (New)", 
+            "နောက်ကြောင်းပြန်စစ်မည်", 
+            "2D Calendar", 
+            "🎯 ကွက်ချုပ် ၃၆ & Filter"
+        ])
 
-        # --- TAB 1: PREDICTION ---
+        # --- TAB 1: PREDICTION (Original) ---
         with tab1:
-            st.subheader("Am, pm တွက်ချက်ခြင်း")
-            if st.button("တွက်ချက်မည်", type="primary"):
+            st.subheader("Am, pm တွက်ချက်ခြင်း (Gap System)")
+            if st.button("တွက်ချက်မည်", type="primary", key="btn_tab1"):
                 with st.spinner("3, 4, 5 ပင်ခြား နှင့် Hybrid Data များကို တွက်ချက်နေပါသည်..."):
                     last_row = daily_draws[-1]
                     predict_slots = []
                     if last_row[2] is None: predict_slots.append(("PM", total_days - 1))
                     else:
+                        # Append a dummy row for future prediction if needed
+                        if len(daily_draws) == total_days: daily_draws.append([None, None, None, None])
                         predict_slots.append(("AM", total_days))
                         predict_slots.append(("PM", total_days))
                         
@@ -285,12 +390,81 @@ if check_password():
                             else:
                                 st.warning(f"⚠️ ဤ {slot} အတွက် မူမတွေ့ရှိပါ။")
 
-        # --- TAB 2: BACKTEST ---
+
+        # --- TAB 2: [NEW] 5x5 ROLLING ENGINE ---
         with tab2:
+            st.subheader("📈 5x5 Hybrid Rolling Window Engine")
+            st.caption("၆ လစာ Trend ကိုဖမ်းပြီး ထိပ် ၅ လုံး x ပိတ် ၅ လုံး ဖြင့် ၂၅ ကွက် ထုတ်ပေးသော စနစ်အသစ်။")
+            
+            c1, c2 = st.columns([1, 2])
+            with c1:
+                e_time = st.radio("ခန့်မှန်းလိုသော အချိန်ရွေးပါ:", ["AM", "PM"], key="e_time")
+            
+            if st.button("ခန့်မှန်းမည် (5x5 Engine)", type="primary"):
+                with st.spinner("Rolling Window ဖြင့် ၂၅ ကွက်ကို ထုတ်ယူနေပါသည်..."):
+                    # Check if we need to append a blank row for the target
+                    calc_draws = daily_draws.copy()
+                    target_d = total_days - 1
+                    
+                    if e_time == "AM" and calc_draws[-1][0] is not None:
+                        calc_draws.append([None, None, None, None])
+                        target_d = total_days
+                    elif e_time == "PM" and calc_draws[-1][2] is not None:
+                        if calc_draws[-1][0] is None: target_d = total_days - 1
+                        else:
+                            calc_draws.append([None, None, None, None])
+                            target_d = total_days
+
+                    res = predict_5x5_rolling_window(target_d, e_time, calc_draws)
+                    
+                    if res:
+                        st.success(f"🎯 **{e_time} အတွက် 5x5 Engine ခန့်မှန်းချက် (Day {target_d})**")
+                        st.write(f"နောက်ဆုံးထွက်ခဲ့သော ဂဏန်း: **{res['last_draw']}**")
+                        
+                        col_h, col_t = st.columns(2)
+                        with col_h: st.info(f"**ထိပ် ၅ လုံး:** {', '.join(str(x) for x in res['heads'])}")
+                        with col_t: st.warning(f"**ပိတ် ၅ လုံး:** {', '.join(str(x) for x in res['tails'])}")
+                        
+                        st.markdown("### 🔥 ထွက်ပေါ်လာသော ၂၅ ကွက်:")
+                        pairs_formatted = " ၊ ".join([f"**{p}**" for p in res['pairs']])
+                        st.write(pairs_formatted)
+                    else:
+                        st.error("Data မလုံလောက်သေးပါ။")
+
+            st.markdown("---")
+            with st.expander("🔍 5x5 Engine ကို နောက်ကြောင်းပြန်စစ်မည် (Backtest)"):
+                bt_e_time = st.radio("Backtest စစ်လိုသော အချိန်:", ["AM", "PM"], key="bt_e_time")
+                if st.button("ရက် ၃၀ စာ Backtest စစ်မည်", key="bt_e_btn"):
+                    with st.spinner("Backtest တွက်ချက်နေပါသည်..."):
+                        test_limit = 30
+                        bt_data = []
+                        start_idx = max(10, len(daily_draws) - test_limit)
+                        
+                        for test_d in range(start_idx, len(daily_draws)):
+                            if bt_e_time == "AM" and daily_draws[test_d][0] is None: continue
+                            if bt_e_time == "PM" and daily_draws[test_d][2] is None: continue
+                            
+                            res = predict_5x5_rolling_window(test_d, bt_e_time, daily_draws)
+                            if res:
+                                bt_data.append({
+                                    "Day": test_d,
+                                    "Target": res['target'],
+                                    "Win/Lose": "✅ WIN" if res['is_win'] else "❌ LOSE"
+                                })
+                        
+                        if bt_data:
+                            df_bt = pd.DataFrame(bt_data)
+                            win_rate = (df_bt['Win/Lose'].str.contains('WIN').sum() / len(df_bt)) * 100
+                            st.success(f"စမ်းသပ်မှု ပြီးဆုံးပါပြီ။ (Win Rate: {win_rate:.1f}%)")
+                            st.dataframe(df_bt, use_container_width=True)
+
+
+        # --- TAB 3: BACKTEST (Gap System) ---
+        with tab3:
             st.subheader("Hybrid Key & Super VIP Backtest")
             bt_col1, bt_col2 = st.columns([1, 2])
             with bt_col1:
-                time_choice = st.radio("စစ်ဆေးလိုသော အချိန်ရွေးပါ:", ["AM", "PM"])
+                time_choice = st.radio("စစ်ဆေးလိုသော အချိန်ရွေးပါ:", ["AM", "PM"], key="bt_v27_time")
             
             if st.button("၁၀ ရက်စာ နောက်ကြောင်းပြန်စစ်မည် 🔍", key="bt_btn"):
                 with st.spinner(f"{time_choice} အတွက် Backtest စစ်ဆေးနေပါသည်..."):
@@ -320,58 +494,50 @@ if check_password():
                         
                     if export_data:
                         df_report = pd.DataFrame(export_data)
-                        st.success("✅ Backtest စစ်ဆေးမှု ပြီးဆုံးပါပြီ။ (Hybrid Key Win Rate 70% ဝန်းကျင်ကို တွေ့ရပါမည်)")
+                        st.success("✅ Backtest စစ်ဆေးမှု ပြီးဆုံးပါပြီ။")
                         st.dataframe(df_report, use_container_width=True)
-                        
-                        buffer = io.BytesIO()
-                        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-                            df_report.to_excel(writer, index=False)
-                        st.download_button(label="📥 Excel ဖိုင်ဖြင့် ဒေါင်းလုဒ်ဆွဲရန်", data=buffer, file_name=f"2D_Hybrid_Backtest_{time_choice}.xlsx", mime="application/vnd.ms-excel")
 
-        # --- TAB 3: CALENDAR VIEW ---
-        with tab3:
-            st.subheader("2D calendar")
+        # --- TAB 4: CALENDAR VIEW ---
+        with tab4:
+            st.subheader("2D Calendar")
             df_display = df.copy()
             df_display['AM'] = df_display.apply(lambda row: f"{int(row['am1'])}{int(row['am2'])}" if pd.notna(row['am1']) and pd.notna(row['am2']) else "-", axis=1)
             df_display['PM'] = df_display.apply(lambda row: f"{int(row['pm1'])}{int(row['pm2'])}" if 'pm1' in df.columns and 'pm2' in df.columns and pd.notna(row['pm1']) and pd.notna(row['pm2']) else "-", axis=1)
             df_display['Day'] = df_display.index
             st.dataframe(df_display[['Day', 'AM', 'PM']], use_container_width=True, hide_index=True)
 
-        # --- TAB 4: ကွက်ချုပ် ၃၆ ကွက် & HYBRID FILTER ---
-        with tab4:
+
+        # --- TAB 5: ကွက်ချုပ် ၃၆ ကွက် & HYBRID FILTER ---
+        with tab5:
             st.subheader("🎯 ကွက်ချုပ် ၃၆ ကွက် နှင့် Hybrid Key စစ်ထုတ်မှုစနစ်")
-            st.caption("Hybrid Key ဖြင့် စစ်ထုတ်ထားသော အကွက်များမှာ အရင်းနည်းပြီး အမြတ်အများဆုံး ကျန်မည့် ရွှေကွက်များ ဖြစ်ပါသည်။")
             
-            if st.button("ရွှေကွက်များ စစ်ထုတ်မည်", type="primary", key="btn_tab4"):
+            if st.button("ရွှေကွက်များ စစ်ထုတ်မည်", type="primary", key="btn_tab5"):
                 with st.spinner("အကောင်းဆုံး ရွှေကွက်များကို စစ်ထုတ်နေပါသည်..."):
-                    last_row = daily_draws[-1]
+                    calc_draws = daily_draws.copy()
+                    last_row = calc_draws[-1]
                     predict_slots = []
-                    if last_row[2] is None: predict_slots.append(("PM", total_days - 1))
+                    
+                    if last_row[2] is None: 
+                        predict_slots.append(("PM", len(calc_draws) - 1))
                     else:
-                        predict_slots.append(("AM", total_days))
-                        predict_slots.append(("PM", total_days))
+                        calc_draws.append([None, None, None, None])
+                        predict_slots.append(("AM", len(calc_draws) - 1))
+                        predict_slots.append(("PM", len(calc_draws) - 1))
                         
                     k_cols = st.columns(len(predict_slots))
                     
                     for i, (slot, t_idx) in enumerate(predict_slots):
-                        # 1. ၃၆ ကွက် ထုတ်မည်
-                        vip_12, main_12, backup_12 = get_12_12_12_kuet_chote(t_idx, slot, daily_draws)
+                        vip_12, main_12, backup_12 = get_12_12_12_kuet_chote(t_idx, slot, calc_draws)
                         all_36 = vip_12 + main_12 + backup_12
-                        
-                        # 2. Hybrid Key ထုတ်မည်
-                        hybrid_key = get_hybrid_super_key(t_idx, slot, daily_draws)
-                        
-                        # 3. Hybrid Key ဖြင့် Filter လုပ်မည်
+                        hybrid_key = get_hybrid_super_key(t_idx, slot, calc_draws)
                         filtered_kuets = [k for k in all_36 if k[0] in hybrid_key or k[1] in hybrid_key]
                         
-                        # Format list into string
                         def format_kuet(num_list):
                             return " , ".join([f"**{n}**" for n in num_list]) if num_list else "မရှိပါ"
 
                         with k_cols[i]:
                             st.markdown(f"### {slot} ကွက်ချုပ် ရလဒ်")
                             st.markdown(f"🔑 **စစ်ထုတ်မည့် Hybrid Key:** [ **{', '.join(hybrid_key)}** ]")
-                            
                             st.success(f"🔥 **စစ်ထုတ်ပြီးသော ရွှေကွက်များ ({len(filtered_kuets)} ကွက်):**")
                             st.info(f"**{format_kuet(filtered_kuets)}**")
                             st.markdown("---")
